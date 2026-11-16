@@ -10,14 +10,16 @@ from pynput import keyboard, mouse
 
 # ---------- Windows SendInput ----------
 user32 = ctypes.WinDLL("user32", use_last_error=True)
-ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(
+    ctypes.c_void_p) == 8 else ctypes.c_ulong
 
 
 # Mantiene coherentes las coordenadas de pynput, Tkinter y Win32
 # en pantallas con escalado DPI (125 %, 150 %, etc.).
 def enable_dpi_awareness():
     try:
-        user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # Per-monitor V2
+        user32.SetProcessDpiAwarenessContext(
+            ctypes.c_void_p(-4))  # Per-monitor V2
         return
     except (AttributeError, OSError):
         pass
@@ -37,7 +39,6 @@ enable_dpi_awareness()
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_SCANCODE = 0x0008
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_VIRTUALDESK = 0x4000
 MOUSEEVENTF_ABSOLUTE = 0x8000
@@ -144,7 +145,8 @@ def screen_point(x, y):
     height = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
 
     if width <= 1 or height <= 1:
-        raise RuntimeError("No se pudieron obtener las dimensiones de pantalla.")
+        raise RuntimeError(
+            "No se pudieron obtener las dimensiones de pantalla.")
 
     nx = round((x - left) * 65535 / (width - 1))
     ny = round((y - top) * 65535 / (height - 1))
@@ -173,6 +175,9 @@ class MacroRecorder:
         self.last_saved_path = None
         self.held_keys = set()
         self.held_buttons = set()
+        self.failsafe_listener = keyboard.GlobalHotKeys(
+            {'<ctrl>+<alt>+<esc>': self.on_failsafe_hotkey})
+        self.failsafe_listener.start()
 
     def add(self, event):
         if self.recording:
@@ -196,7 +201,8 @@ class MacroRecorder:
         self.status("Grabando...")
 
     def on_move(self, x, y):
-        # Descarta únicamente coordenadas repetidas; no impone un umbral de píxeles.
+        # Descarta únicamente coordenadas repetidas; no impone un umbral de
+        # píxeles.
         point = (int(x), int(y))
         if point != self.last_move:
             self.last_move = point
@@ -211,6 +217,9 @@ class MacroRecorder:
                   "dx": int(dx), "dy": int(dy)})
 
     def on_key(self, key, down):
+        if key == keyboard.Key.f1:
+            return
+
         if down and key == keyboard.Key.f2:
             self.stop_recording()
             return
@@ -248,7 +257,7 @@ class MacroRecorder:
         else:
             self.status("No se registraron eventos")
 
-    def play(self, filename):
+    def play(self, filename, repetitions=1):
         if self.recording or self.playing:
             return
 
@@ -264,88 +273,127 @@ class MacroRecorder:
 
         self.playing = True
         self.stop.clear()
-        self.status("Reproduciendo...")
+
+        if repetitions == 0:
+            self.status("Reproduciendo en bucle infinito...")
+        else:
+            self.status(f"Reproduciendo... (0/{repetitions})")
 
         def worker():
             try:
-                start = time.perf_counter()
-                last_x = last_y = None
+                iteration = 0
 
-                for event in events:
-                    if self.stop.is_set():
-                        break
+                while repetitions == 0 or iteration < repetitions:
+                    start = time.perf_counter()
 
-                    target = float(event.get("time", 0))
-                    remaining = target - (time.perf_counter() - start)
-                    if remaining > 0:
-                        if self.stop.wait(remaining):
+                    for event in events:
+                        if self.stop.is_set():
                             break
 
-                    kind = event.get("type")
+                        target = float(event.get("time", 0))
 
-                    if kind == "move":
-                        last_x, last_y = event["x"], event["y"]
-                        move_to_recorded_position(last_x, last_y)
+                        while True:
+                            if self.stop.is_set():
+                                break
 
-                    elif kind == "click":
-                        last_x, last_y = event["x"], event["y"]
-                        move_to_recorded_position(last_x, last_y)
-                        button = event.get("button", "left")
-                        pressed = event.get("pressed", True)
-                        if button == "left":
-                            flag = MOUSEEVENTF_LEFTDOWN if pressed else MOUSEEVENTF_LEFTUP
-                        elif button == "right":
-                            flag = MOUSEEVENTF_RIGHTDOWN if pressed else MOUSEEVENTF_RIGHTUP
-                        else:
-                            flag = MOUSEEVENTF_MIDDLEDOWN if pressed else MOUSEEVENTF_MIDDLEUP
-                        mouse_event(flag)
+                            remaining = target - (time.perf_counter() - start)
 
-                        if pressed:
-                            up_flag = {
-                                "left": MOUSEEVENTF_LEFTUP,
-                                "right": MOUSEEVENTF_RIGHTUP,
-                                "middle": MOUSEEVENTF_MIDDLEUP
-                            }[button]
-                            self.held_buttons.add((button, up_flag))
-                        else:
-                            self.held_buttons.discard((
-                                button,
-                                {
+                            if remaining <= 0:
+                                break
+
+                            self.stop.wait(min(remaining, 0.01))
+
+                        if self.stop.is_set():
+                            break
+
+                        kind = event.get("type")
+
+                        if kind == "move":
+                            last_x, last_y = event["x"], event["y"]
+                            move_to_recorded_position(last_x, last_y)
+
+                        elif kind == "click":
+                            last_x, last_y = event["x"], event["y"]
+                            move_to_recorded_position(last_x, last_y)
+
+                            button = event.get("button", "left")
+                            pressed = event.get("pressed", True)
+
+                            if button == "left":
+                                flag = MOUSEEVENTF_LEFTDOWN if pressed else MOUSEEVENTF_LEFTUP
+                            elif button == "right":
+                                flag = MOUSEEVENTF_RIGHTDOWN if pressed else MOUSEEVENTF_RIGHTUP
+                            else:
+                                flag = MOUSEEVENTF_MIDDLEDOWN if pressed else MOUSEEVENTF_MIDDLEUP
+
+                            mouse_event(flag)
+
+                            if pressed:
+                                up_flag = {
                                     "left": MOUSEEVENTF_LEFTUP,
                                     "right": MOUSEEVENTF_RIGHTUP,
                                     "middle": MOUSEEVENTF_MIDDLEUP
                                 }[button]
-                            ))
 
-                    elif kind == "scroll":
-                        last_x, last_y = event["x"], event["y"]
-                        move_to_recorded_position(last_x, last_y)
-                        dy = int(event.get("dy", 0))
-                        dx = int(event.get("dx", 0))
-                        if dy:
-                            mouse_event(MOUSEEVENTF_WHEEL, data=dy * 120)
-                        if dx:
-                            mouse_event(MOUSEEVENTF_HWHEEL, data=dx * 120)
+                                self.held_buttons.add((button, up_flag))
+                            else:
+                                self.held_buttons.discard((
+                                    button,
+                                    {
+                                        "left": MOUSEEVENTF_LEFTUP,
+                                        "right": MOUSEEVENTF_RIGHTUP,
+                                        "middle": MOUSEEVENTF_MIDDLEUP
+                                    }[button]
+                                ))
 
-                    elif kind == "key_down":
-                        key = event["key"]
-                        key_event(key, True)
-                        self.held_keys.add(key)
+                        elif kind == "scroll":
+                            last_x, last_y = event["x"], event["y"]
+                            move_to_recorded_position(last_x, last_y)
 
-                    elif kind == "key_up":
-                        key = event["key"]
-                        key_event(key, False)
-                        self.held_keys.discard(key)
+                            dy = int(event.get("dy", 0))
+                            dx = int(event.get("dx", 0))
+
+                            if dy:
+                                mouse_event(MOUSEEVENTF_WHEEL, data=dy * 120)
+
+                            if dx:
+                                mouse_event(MOUSEEVENTF_HWHEEL, data=dx * 120)
+
+                        elif kind == "key_down":
+                            key = event["key"]
+                            key_event(key, True)
+                            self.held_keys.add(key)
+
+                        elif kind == "key_up":
+                            key = event["key"]
+                            key_event(key, False)
+                            self.held_keys.discard(key)
+
+                    if self.stop.is_set():
+                        break
+
+                    iteration += 1
+
+                    if repetitions != 0:
+                        self.status(
+                            f"Reproduciendo... ({iteration}/{repetitions})"
+                        )
 
             except Exception as exc:
                 self.status(f"Error en reproducción: {exc}")
+
             finally:
                 self.playing = False
+
                 if not self.stop.is_set():
                     self.status("Reproducción finalizada")
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def on_failsafe_hotkey(self):
+        if self.playing:
+            self.emergency_stop()
+            self.status("PyFailsafe activado: reproducción detenida")
 
     def emergency_stop(self):
         self.stop.set()
@@ -365,6 +413,7 @@ class MacroRecorder:
         self.held_keys.clear()
         self.held_buttons.clear()
         self.status("Detenido")
+
 
 class MacroEditor:
     def __init__(self, parent, filename):
@@ -591,7 +640,8 @@ class MacroEditor:
                     if field == "time":
                         value = float(value)
                         if value < 0:
-                            raise ValueError("El tiempo no puede ser negativo.")
+                            raise ValueError(
+                                "El tiempo no puede ser negativo.")
 
                     elif field in ("x", "y", "dx", "dy"):
                         value = int(value)
@@ -775,16 +825,43 @@ class App:
             command=self.open_macro
         ).pack(fill="x", padx=25, pady=4)
 
-        tk.Button(
-            root,
-            text="Detener reproducción",
-            command=self.recorder.emergency_stop
-        ).pack(fill="x", padx=25, pady=4)
+        # Controles de repetición
+        repeat_frame = tk.Frame(root)
+        repeat_frame.pack(fill="x", padx=25, pady=5)
 
-        root.bind(
-            "<F1>",
-            lambda event: self.recorder.start_recording()
+        tk.Label(
+            repeat_frame,
+            text="Repeticiones:"
+        ).pack(side="left")
+
+        self.repeat_var = tk.IntVar(value=1)
+
+        self.repeat_spin = tk.Spinbox(
+            repeat_frame,
+            from_=1,
+            to=999999,
+            width=8,
+            textvariable=self.repeat_var
         )
+        self.repeat_spin.pack(side="left", padx=8)
+
+        self.infinite_var = tk.BooleanVar(value=False)
+
+        tk.Checkbutton(
+            repeat_frame,
+            text="Infinito",
+            variable=self.infinite_var,
+            command=lambda: self.repeat_spin.config(
+                state="disabled" if self.infinite_var.get() else "normal"
+            )
+        ).pack(side="left")
+
+        self.hotkey_listener = keyboard.GlobalHotKeys({
+            '<f1>': lambda: self.root.after(
+                0, self.recorder.start_recording
+            )
+        })
+        self.hotkey_listener.start()
 
         root.bind(
             "<F2>",
@@ -825,11 +902,36 @@ class App:
         )
 
         if path:
-            self.recorder.play(path)
+            try:
+                repetitions = (
+                    0 if self.infinite_var.get()
+                    else self.repeat_var.get()
+                )
+
+                repetitions = int(repetitions)
+
+                if repetitions < 1 and repetitions != 0:
+                    raise ValueError(
+                        "El número de repeticiones debe ser positivo."
+                    )
+
+                self.root.state("iconic")
+                self.root.update_idletasks()
+
+                self.root.after(
+                    300,
+                    lambda: self.recorder.play(path, repetitions)
+                )
+
+            except ValueError as exc:
+                messagebox.showerror("Error", str(exc))
 
     def close(self):
+        self.hotkey_listener.stop()
         self.recorder.emergency_stop()
+        self.recorder.failsafe_listener.stop()
         self.root.destroy()
+
 
 
 if __name__ == "__main__":
